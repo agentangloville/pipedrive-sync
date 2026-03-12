@@ -9,18 +9,61 @@ async function fetchAllDeals(apiKey, subdomain) {
 
 function getEmail(person, label) {
   if (!person || !person.email) return "";
-  const e = person.email.find(x => x.label === label);
-  return e ? e.value : "";
+  const found = person.email.find(x => x.label?.toLowerCase() === label.toLowerCase());
+  return found ? found.value : "";
 }
 
 function getPhone(person, label) {
   if (!person || !person.phone) return "";
-  const p = person.phone.find(x => x.label === label);
-  return p ? p.value : "";
+  const found = person.phone.find(x => x.label?.toLowerCase() === label.toLowerCase());
+  return found ? found.value : "";
 }
 
-function getCustomField(deal, key) {
-  return deal[key] !== undefined && deal[key] !== null ? deal[key] : "";
+// Deal custom field keys
+const D = {
+  crmId: "9a593a72e1ac99aa6228dadfcbbcb48a875cbc4b",
+  closingDate: "47072fdbb046948cf50a291844f2724a6a6cdfc8",
+  discountedAmount: "87832e6fd2b4ef37ae64965eca3552f027e29b72",
+  leadStatus: "6b39cbc903089df55061333fae3642370c932c76",
+  product: "a398a4e4adedfc6bb29d2a122456c638bb98b480",
+  url: "da0e8c45be94fd682b276658f8aba7cc57ce59b7",
+  utmSource: "8f6db0ecef4491e2500a7459c389d2b4770e6714",
+  utmMedium: "6184ff13bbf896cb8d94779e3891dfa303835fd6",
+  utmCampaign: "0640b6ea3f8e6c9680a36fc9c6621b48eb6e3344",
+  utmContent: "d120eb0051e3ea871290c6222ceae5bdee626358",
+  recordIdZoho: "302906ff491b84c82a54fbb38717ba24b4621c0a",
+  studentFirstName: "a3d933768e6b8f330dc4c710c2247086e1d61eb0",
+  studentLastName: "0bd641c177e6eadceabf4e27e30cb8d86fe2c3ea",
+  studentGender: "406f206da48b48233e4c965c33e8bd1be6ab40e8",
+  leadSource: "6676ea5153546b00a89ef9292506b258a0d2d348",
+  depositDate: "82a6cf74b03fae50cfcacc809ac48fe1e63f4ddf",
+};
+
+// Person custom field keys
+const P = {
+  provincia: "d0e9d806c2711711c2732a0b1e5f0d09d104b479",
+  studentDob: "f444ce72d8d5c2869c0d04bf0c31f892c5138d79",
+  marketingConsent: "59e9bc2065371b1b02bc41100f1ba8f439d29f78",
+  marketingConsentPhone: "2f93092a3e9e19cc8fdc6b6a0dba7d5306fe72ca",
+  utmSource: "9b4b49b382b5a7c3906022852c9e49d286dff72a",
+};
+
+// Resolve enum/set fields to labels
+function resolveField(val, fieldKey, dealFieldDefs, personFieldDefs) {
+  if (val === null || val === undefined || val === "") return "";
+  const allDefs = [...(dealFieldDefs || []), ...(personFieldDefs || [])];
+  const def = allDefs.find(f => f.key === fieldKey);
+  if (!def || !def.options) return String(val);
+  // Handle set fields (comma-separated IDs)
+  if (def.field_type === "set") {
+    const ids = String(val).split(",").map(x => x.trim());
+    return ids.map(id => {
+      const opt = def.options.find(o => String(o.id) === id);
+      return opt ? opt.label : id;
+    }).join(", ");
+  }
+  const opt = def.options.find(o => String(o.id) === String(val));
+  return opt ? opt.label : String(val);
 }
 
 async function writeToSheets(accessToken, spreadsheetId, sheetName, headers, rows) {
@@ -68,8 +111,8 @@ export default function App() {
   const [preview, setPreview] = useState(false);
   const intervalRef = useRef(null);
   const [step, setStep] = useState("config");
-  const [fieldMap, setFieldMap] = useState({});
-  const [fieldMapLoaded, setFieldMapLoaded] = useState(false);
+  const [dealFieldDefs, setDealFieldDefs] = useState([]);
+  const [personFieldDefs, setPersonFieldDefs] = useState([]);
 
   useEffect(() => {
     try {
@@ -79,7 +122,6 @@ export default function App() {
       if (c.spreadsheetId) setSpreadsheetId(c.spreadsheetId);
       if (c.googleToken) setGoogleToken(c.googleToken);
       if (c.step) setStep(c.step);
-      if (c.fieldMap) { setFieldMap(c.fieldMap); setFieldMapLoaded(true); }
     } catch {}
   }, []);
 
@@ -92,26 +134,19 @@ export default function App() {
     }
   }, [autoInterval, pipedriveKey, subdomain, spreadsheetId, googleToken]);
 
-  async function loadFieldMap() {
-    try {
-      const r = await fetch(`/api/deals?apiKey=${encodeURIComponent(pipedriveKey)}&subdomain=${encodeURIComponent(subdomain)}`);
-      const d = await r.json();
-      if (d.error) throw new Error(d.error);
-      if (d.data && d.data.length > 0) {
-        const sample = d.data[0];
-        const keys = Object.keys(sample).filter(k => k.match(/^[a-f0-9]{40}$/));
-        const map = {};
-        keys.forEach(k => { map[k] = sample[k] !== null ? typeof sample[k] : "unknown"; });
-        setFieldMap(map);
-        setFieldMapLoaded(true);
-      }
-    } catch {}
-  }
-
   function saveConfig() {
-    localStorage.setItem("pd_sync_config", JSON.stringify({ pipedriveKey, subdomain, spreadsheetId, googleToken, step: "sync", fieldMap }));
+    localStorage.setItem("pd_sync_config", JSON.stringify({ pipedriveKey, subdomain, spreadsheetId, googleToken, step: "sync" }));
     setStep("sync");
     setStatus({ type: "success", msg: "Konfiguracja zapisana!" });
+  }
+
+  async function fetchFieldDefs() {
+    try {
+      const [dr, pr] = await Promise.all([
+        fetch(`/api/deals?apiKey=${encodeURIComponent(pipedriveKey)}&subdomain=${encodeURIComponent(subdomain)}&fields=deal`),
+        fetch(`/api/deals?apiKey=${encodeURIComponent(pipedriveKey)}&subdomain=${encodeURIComponent(subdomain)}&fields=person`),
+      ]);
+    } catch {}
   }
 
   async function doSync(auto = false) {
@@ -149,47 +184,47 @@ export default function App() {
         const person = personMap[personId] || null;
         return [
           d.title || "",
-          d.id || "",
-          d.close_time ? d.close_time.split(" ")[0] : "",
+          d[D.crmId] || "",
+          d[D.closingDate] || "",
           d.add_time ? d.add_time.split(" ")[0] : "",
-          d.value || 0,
+          d[D.discountedAmount] || "",
           d.person_name || "",
           d.owner_name || "",
           getEmail(person, "work"),
           getEmail(person, "home"),
           getEmail(person, "other"),
           d.id || "",
-          getCustomField(d, "lead_status") || getCustomField(d, "label") || "",
-          getCustomField(d, "product") || "",
-          getCustomField(d, "deal_url") || "",
-          getCustomField(d, "utm_source") || "",
-          getCustomField(d, "utm_medium") || "",
-          getCustomField(d, "utm_campaign") || "",
-          getCustomField(d, "utm_content") || "",
+          d[D.leadStatus] || "",
+          d[D.product] || "",
+          d[D.url] || "",
+          d[D.utmSource] || "",
+          d[D.utmMedium] || "",
+          d[D.utmCampaign] || "",
+          d[D.utmContent] || "",
           d.lost_reason || "",
-          person ? getCustomField(person, "provincia") || "" : "",
+          person ? (person[P.provincia] || "") : "",
           d.stage_name || "",
           d.status || "",
           personId || "",
-          getCustomField(d, "record_id_deals_zoho") || "",
-          person ? getCustomField(person, "marketing_consent") || "" : "",
-          person ? getCustomField(person, "marketing_consent_phone") || "" : "",
+          d[D.recordIdZoho] || "",
+          person ? (person[P.marketingConsent] || "") : "",
+          person ? (person[P.marketingConsentPhone] || "") : "",
           getPhone(person, "work"),
           getPhone(person, "home"),
           getPhone(person, "mobile"),
           getPhone(person, "other"),
-          getCustomField(d, "student_first_name") || "",
-          getCustomField(d, "student_last_name") || "",
-          person ? getCustomField(person, "student_dob") || "" : "",
-          getCustomField(d, "student_gender") || "",
-          getCustomField(d, "lead_source") || "",
-          getCustomField(d, "deposit_date") || "",
+          d[D.studentFirstName] || "",
+          d[D.studentLastName] || "",
+          person ? (person[P.studentDob] || "") : "",
+          d[D.studentGender] || "",
+          d[D.leadSource] || "",
+          d[D.depositDate] || "",
           d.last_activity_date || "",
           d.origin || "",
           d.channel || "",
           d.origin_id || "",
           d.channel_id || "",
-          person ? getCustomField(person, "utm_source") || "" : "",
+          person ? (person[P.utmSource] || "") : "",
         ];
       });
 
