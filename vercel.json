@@ -3,10 +3,17 @@
     {
       "path": "/api/cron",
       "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron2",
+      "schedule": "3,18,33,48 * * * *"
     }
   ],
   "functions": {
     "api/cron.js": {
+      "maxDuration": 300
+    },
+    "api/cron2.js": {
       "maxDuration": 300
     },
     "api/deals.js": {
