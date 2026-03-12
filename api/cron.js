@@ -30,16 +30,20 @@ async function getAccessToken(email, privateKey) {
   return d.access_token;
 }
 
+const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
 async function fetchAllDeals(apiKey, subdomain) {
   let all = [], start = 0, more = true;
   while (more) {
-    const url = `https://${subdomain}.pipedrive.com/api/v1/deals?api_token=${apiKey}&limit=100&start=${start}&status=all_not_deleted`;
+    const url = `https://${subdomain}.pipedrive.com/api/v1/deals?api_token=${apiKey}&limit=500&start=${start}&status=all_not_deleted`;
     const r = await fetch(url);
+    if (r.status === 429) { await delay(2000); continue; }
     const d = await r.json();
     if (!d.success) throw new Error(d.error || "Pipedrive API error");
     all = all.concat(d.data || []);
     more = d.additional_data?.pagination?.more_items_in_collection || false;
-    start += 100;
+    start += 500;
+    if (more) await delay(500);
   }
   return all;
 }
@@ -47,13 +51,15 @@ async function fetchAllDeals(apiKey, subdomain) {
 async function fetchAllPersons(apiKey, subdomain) {
   let all = [], start = 0, more = true;
   while (more) {
-    const url = `https://${subdomain}.pipedrive.com/api/v1/persons?api_token=${apiKey}&limit=100&start=${start}`;
+    const url = `https://${subdomain}.pipedrive.com/api/v1/persons?api_token=${apiKey}&limit=500&start=${start}`;
     const r = await fetch(url);
+    if (r.status === 429) { await delay(2000); continue; }
     const d = await r.json();
     if (!d.success) break;
     all = all.concat(d.data || []);
     more = d.additional_data?.pagination?.more_items_in_collection || false;
-    start += 100;
+    start += 500;
+    if (more) await delay(500);
   }
   return all;
 }
