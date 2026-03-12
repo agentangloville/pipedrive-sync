@@ -27,10 +27,30 @@ async function getAccessToken(email, privateKey) {
 
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
-async function fetchAll(apiKey, subdomain, entity) {
+// Fetch deals in a range [startFrom, startFrom+batchSize)
+async function fetchDealsBatch(apiKey, subdomain, startFrom, batchSize) {
+  let all = [], start = startFrom, fetched = 0, more = true;
+  while (more && fetched < batchSize) {
+    const limit = Math.min(500, batchSize - fetched);
+    const url = `https://${subdomain}.pipedrive.com/api/v1/deals?api_token=${apiKey}&limit=${limit}&start=${start}&status=all_not_deleted`;
+    const r = await fetch(url);
+    if (r.status === 429) { await delay(2000); continue; }
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || "Pipedrive API error");
+    const items = d.data || [];
+    all = all.concat(items);
+    fetched += items.length;
+    more = d.additional_data?.pagination?.more_items_in_collection || false;
+    start += items.length;
+    if (more && fetched < batchSize) await delay(300);
+  }
+  return { deals: all, nextStart: start, hasMore: more && fetched >= batchSize };
+}
+
+async function fetchAllPersons(apiKey, subdomain) {
   let all = [], start = 0, more = true;
   while (more) {
-    const url = `https://${subdomain}.pipedrive.com/api/v1/${entity}?api_token=${apiKey}&limit=500&start=${start}${entity === "deals" ? "&status=all_not_deleted" : ""}`;
+    const url = `https://${subdomain}.pipedrive.com/api/v1/persons?api_token=${apiKey}&limit=500&start=${start}`;
     const r = await fetch(url);
     if (r.status === 429) { await delay(2000); continue; }
     const d = await r.json();
@@ -38,7 +58,7 @@ async function fetchAll(apiKey, subdomain, entity) {
     all = all.concat(d.data || []);
     more = d.additional_data?.pagination?.more_items_in_collection || false;
     start += 500;
-    if (more) await delay(500);
+    if (more) await delay(300);
   }
   return all;
 }
@@ -55,7 +75,6 @@ function getPhone(person, label) {
   return f ? f.value : "";
 }
 
-// Deal custom field keys for anglovillespzoo
 const D = {
   source: "29b3442c950f854d7daba562fd22bb94d132d5ad",
   utmSource: "e25825cf1ede421aad3f2202305a1d61c89ab79c",
@@ -68,7 +87,6 @@ const D = {
   referralId: "ec0f453140b476b2f6badcdaef1192aaebf62acc",
 };
 
-// Person custom field keys for anglovillespzoo
 const P = {
   utmSource: "20f25ba5f3b132c1aaefea4bafafded5f4969753",
   utmMedium: "95f0f2cbae6dcb6255abdd44c7b6d8d64bc9ae25",
@@ -81,6 +99,83 @@ const P = {
   dob: "00fa19c629ccefbc17214d75cebbc187ad64fbe7",
 };
 
+const HEADERS = [
+  "Deal - Title", "Deal - Owner",
+  "Person - Email - Work", "Person - Email - Home", "Person - Email - Other",
+  "Person - Phone - Work", "Person - Phone - Home", "Person - Phone - Mobile", "Person - Phone - Other",
+  "Deal - Deal created", "Deal - deal_utm_content", "Deal - deal_utm_source",
+  "Deal - deal_utm_medium", "Deal - ID", "Deal - Pipeline", "Deal - Source",
+  "Deal - Stage", "Person - ID", "Person - Owner",
+  "Person - pd_utm_campaign", "Person - pd_utm_content", "Person - pd_utm_medium",
+  "Person - Person created", "Person - pd_utm_source", "Person - pd_utm_term",
+  "Deal - deal_utm_campaign", "Person - pd_channel", "Person - Country code",
+  "Person - Country of origin", "Deal - Contact person", "Deal - Lost reason",
+  "Deal - Status", "Deal - Deposit Payment Date", "Deal - Unsubscribes",
+  "Person - DOB", "Person - Name", "Deal - Referral ID"
+];
+
+function dealToRow(d, personMap) {
+  const pid = d.person_id?.value || d.person_id;
+  const p = personMap[pid] || null;
+  return [
+    d.title || "", d.owner_name || "",
+    getEmail(p, "work"), getEmail(p, "home"), getEmail(p, "other"),
+    getPhone(p, "work"), getPhone(p, "home"), getPhone(p, "mobile"), getPhone(p, "other"),
+    d.add_time ? d.add_time.split(" ")[0] : "",
+    d[D.utmContent] || "", d[D.utmSource] || "", d[D.utmMedium] || "",
+    d.id || "", d.pipeline_id || "", d[D.source] || "", d.stage_name || "",
+    pid || "", p ? (p.owner_name || "") : "",
+    p ? (p[P.utmCampaign] || "") : "", p ? (p[P.utmContent] || "") : "",
+    p ? (p[P.utmMedium] || "") : "",
+    p ? (p.add_time ? p.add_time.split(" ")[0] : "") : "",
+    p ? (p[P.utmSource] || "") : "", p ? (p[P.utmTerm] || "") : "",
+    d[D.utmCampaign] || "", p ? (p[P.pdChannel] || "") : "",
+    p ? (p[P.countryCode] || "") : "", p ? (p[P.countryOfOrigin] || "") : "",
+    d.person_name || "", d.lost_reason || "", d.status || "",
+    d[D.depositDate] || "", d[D.unsubscribes] || "",
+    p ? (p[P.dob] || "") : "", p ? (p.name || "") : "",
+    d[D.referralId] || "",
+  ];
+}
+
+async function appendLog(accessToken, spreadsheetId, logRow) {
+  await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet2!A:D:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ values: [logRow] }),
+    }
+  );
+}
+
+async function getStateFromSheet(accessToken, spreadsheetId) {
+  try {
+    const r = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet3!A1:B1`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const d = await r.json();
+    if (d.values && d.values[0]) {
+      return { nextStart: parseInt(d.values[0][0]) || 0, phase: d.values[0][1] || "deals" };
+    }
+  } catch {}
+  return { nextStart: 0, phase: "init" };
+}
+
+async function saveStateToSheet(accessToken, spreadsheetId, nextStart, phase) {
+  await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet3!A1:B1?valueInputOption=RAW`,
+    {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ values: [[nextStart, phase]] }),
+    }
+  );
+}
+
+const BATCH_SIZE = 20000;
+
 export default async function handler(req, res) {
   const startTime = Date.now();
   const apiKey = process.env.PIPEDRIVE_API_KEY_2;
@@ -91,110 +186,66 @@ export default async function handler(req, res) {
 
   try {
     const accessToken = await getAccessToken(clientEmail, privateKey);
-    const [deals, persons] = await Promise.all([
-      fetchAll(apiKey, subdomain, "deals"),
-      fetchAll(apiKey, subdomain, "persons"),
-    ]);
+    const state = await getStateFromSheet(accessToken, spreadsheetId);
+    const now = new Date().toLocaleString("pl-PL", { timeZone: "Europe/Warsaw" });
 
+    if (state.phase === "init" || state.nextStart === 0) {
+      // Phase 1: Start fresh - clear sheet, write headers, fetch persons
+      await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1:BZ200000:clear`,
+        { method: "POST", headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1?valueInputOption=RAW`,
+        {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ values: [HEADERS] }),
+        }
+      );
+      await saveStateToSheet(accessToken, spreadsheetId, 0, "deals");
+      await appendLog(accessToken, spreadsheetId, [now, "[PD2] Rozpoczęto nowy cykl sync", "", "INIT"]);
+    }
+
+    // Fetch persons (needed for every batch)
+    const persons = await fetchAllPersons(apiKey, subdomain);
     const personMap = {};
     persons.forEach(p => { personMap[p.id] = p; });
 
-    const headers = [
-      "Deal - Title", "Deal - Owner",
-      "Person - Email - Work", "Person - Email - Home", "Person - Email - Other",
-      "Person - Phone - Work", "Person - Phone - Home", "Person - Phone - Mobile", "Person - Phone - Other",
-      "Deal - Deal created", "Deal - deal_utm_content", "Deal - deal_utm_source",
-      "Deal - deal_utm_medium", "Deal - ID", "Deal - Pipeline", "Deal - Source",
-      "Deal - Stage", "Person - ID", "Person - Owner",
-      "Person - pd_utm_campaign", "Person - pd_utm_content", "Person - pd_utm_medium",
-      "Person - Person created", "Person - pd_utm_source", "Person - pd_utm_term",
-      "Deal - deal_utm_campaign", "Person - pd_channel", "Person - Country code",
-      "Person - Country of origin", "Deal - Contact person", "Deal - Lost reason",
-      "Deal - Status", "Deal - Deposit Payment Date", "Deal - Unsubscribes",
-      "Person - DOB", "Person - Name", "Deal - Referral ID"
-    ];
+    // Fetch batch of deals
+    const { deals, nextStart, hasMore } = await fetchDealsBatch(apiKey, subdomain, state.nextStart || 0, BATCH_SIZE);
 
-    const rows = deals.map(d => {
-      const pid = d.person_id?.value || d.person_id;
-      const p = personMap[pid] || null;
-      return [
-        d.title || "",
-        d.owner_name || "",
-        getEmail(p, "work"), getEmail(p, "home"), getEmail(p, "other"),
-        getPhone(p, "work"), getPhone(p, "home"), getPhone(p, "mobile"), getPhone(p, "other"),
-        d.add_time ? d.add_time.split(" ")[0] : "",
-        d[D.utmContent] || "",
-        d[D.utmSource] || "",
-        d[D.utmMedium] || "",
-        d.id || "",
-        d.pipeline_id || "",
-        d[D.source] || "",
-        d.stage_name || "",
-        pid || "",
-        p ? (p.owner_name || "") : "",
-        p ? (p[P.utmCampaign] || "") : "",
-        p ? (p[P.utmContent] || "") : "",
-        p ? (p[P.utmMedium] || "") : "",
-        p ? (p.add_time ? p.add_time.split(" ")[0] : "") : "",
-        p ? (p[P.utmSource] || "") : "",
-        p ? (p[P.utmTerm] || "") : "",
-        d[D.utmCampaign] || "",
-        p ? (p[P.pdChannel] || "") : "",
-        p ? (p[P.countryCode] || "") : "",
-        p ? (p[P.countryOfOrigin] || "") : "",
-        d.person_name || "",
-        d.lost_reason || "",
-        d.status || "",
-        d[D.depositDate] || "",
-        d[D.unsubscribes] || "",
-        p ? (p[P.dob] || "") : "",
-        p ? (p.name || "") : "",
-        d[D.referralId] || "",
-      ];
-    });
-
-    const values = [headers, ...rows];
-
-    await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1:BZ10000:clear`,
-      { method: "POST", headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-
-    await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1?valueInputOption=RAW`,
-      {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ values }),
-      }
-    );
+    if (deals.length > 0) {
+      const rows = deals.map(d => dealToRow(d, personMap));
+      const rowStart = (state.nextStart || 0) + 2; // +2 for header row and 1-indexed
+      await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A${rowStart}?valueInputOption=RAW`,
+        {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ values: rows }),
+        }
+      );
+    }
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-    const now = new Date().toLocaleString("pl-PL", { timeZone: "Europe/Warsaw" });
-    const logRow = [now, `[PD2] Zsynchronizowano ${deals.length} transakcji`, `${duration}s`, "OK"];
 
-    await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet2!A:D:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ values: [logRow] }),
-      }
-    );
-
-    res.status(200).json({ success: true, deals: deals.length, duration: `${duration}s` });
+    if (hasMore) {
+      await saveStateToSheet(accessToken, spreadsheetId, nextStart, "deals");
+      await appendLog(accessToken, spreadsheetId, [now, `[PD2] Batch: ${deals.length} dealów (offset ${state.nextStart || 0}-${nextStart}), kontynuacja...`, `${duration}s`, "BATCH"]);
+      res.status(200).json({ success: true, batch: deals.length, nextStart, hasMore: true, duration: `${duration}s` });
+    } else {
+      const totalDeals = (state.nextStart || 0) + deals.length;
+      await saveStateToSheet(accessToken, spreadsheetId, 0, "init");
+      await appendLog(accessToken, spreadsheetId, [now, `[PD2] ZAKOŃCZONO - łącznie ${totalDeals} transakcji`, `${duration}s`, "DONE"]);
+      res.status(200).json({ success: true, totalDeals, hasMore: false, duration: `${duration}s` });
+    }
   } catch (e) {
     try {
       const accessToken = await getAccessToken(clientEmail, privateKey);
       const now = new Date().toLocaleString("pl-PL", { timeZone: "Europe/Warsaw" });
-      await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet2!A:D:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ values: [[now, `[PD2] Błąd: ${e.message}`, "", "ERROR"]] }),
-        }
-      );
+      await saveStateToSheet(accessToken, spreadsheetId, 0, "init");
+      await appendLog(accessToken, spreadsheetId, [now, `[PD2] Błąd: ${e.message}`, "", "ERROR"]);
     } catch {}
     res.status(500).json({ error: e.message });
   }
