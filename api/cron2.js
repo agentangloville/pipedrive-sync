@@ -26,11 +26,12 @@ async function getAccessToken(email, privateKey) {
 }
 
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
+const MAX_RUN_TIME = 250000; // 250 seconds safety limit
 
-// Fetch deals in a range [startFrom, startFrom+batchSize)
-async function fetchDealsBatch(apiKey, subdomain, startFrom, batchSize) {
+async function fetchDealsBatch(apiKey, subdomain, startFrom, batchSize, startTime) {
   let all = [], start = startFrom, fetched = 0, more = true;
   while (more && fetched < batchSize) {
+    if (Date.now() - startTime > MAX_RUN_TIME) break;
     const limit = Math.min(500, batchSize - fetched);
     const url = `https://${subdomain}.pipedrive.com/api/v1/deals?api_token=${apiKey}&limit=${limit}&start=${start}&status=all_not_deleted`;
     const r = await fetch(url);
@@ -42,25 +43,9 @@ async function fetchDealsBatch(apiKey, subdomain, startFrom, batchSize) {
     fetched += items.length;
     more = d.additional_data?.pagination?.more_items_in_collection || false;
     start += items.length;
-    if (more && fetched < batchSize) await delay(300);
+    if (more && fetched < batchSize) await delay(200);
   }
-  return { deals: all, nextStart: start, hasMore: more && fetched >= batchSize };
-}
-
-async function fetchAllPersons(apiKey, subdomain) {
-  let all = [], start = 0, more = true;
-  while (more) {
-    const url = `https://${subdomain}.pipedrive.com/api/v1/persons?api_token=${apiKey}&limit=500&start=${start}`;
-    const r = await fetch(url);
-    if (r.status === 429) { await delay(2000); continue; }
-    const d = await r.json();
-    if (!d.success) break;
-    all = all.concat(d.data || []);
-    more = d.additional_data?.pagination?.more_items_in_collection || false;
-    start += 500;
-    if (more) await delay(300);
-  }
-  return all;
+  return { deals: all, nextStart: start, hasMore: more };
 }
 
 function getEmail(person, label) {
@@ -81,7 +66,6 @@ const D = {
   utmMedium: "100ccb847c59d1a8fa34b63f196c1bd17b9f08b3",
   utmCampaign: "4f469c9528699fbab764ff3c912239b91a4db517",
   utmContent: "a2ac65af42ba68b90a26d43d9fdc669467402687",
-  url: "e59aba576d9dfdeb587ba20f08f615360b348164",
   depositDate: "bfb7b2cecfc466f831d19a209dcf06013568f088",
   unsubscribes: "7b73b34d4450ee54ad4ef4440148a5032fe5481b",
   referralId: "ec0f453140b476b2f6badcdaef1192aaebf62acc",
@@ -114,9 +98,37 @@ const HEADERS = [
   "Person - DOB", "Person - Name", "Deal - Referral ID"
 ];
 
-function dealToRow(d, personMap) {
-  const pid = d.person_id?.value || d.person_id;
-  const p = personMap[pid] || null;
+function dealToRow(d) {
+  const pName = d.person_id?.name || d.person_name || "";
+  const pId = d.person_id?.value || d.person_id || "";
+  const pEmail = d.person_id?.email || [];
+  const pPhone = d.person_id?.phone || [];
+  const getE = (label) => { const f = pEmail.find(x => x.label?.toLowerCase() === label); return f ? f.value : ""; };
+  const getPh = (label) => { const f = pPhone.find(x => x.label?.toLowerCase() === label); return f ? f.value : ""; };
+  return [
+    d.title || "", d.owner_name || "",
+    getE("work"), getE("home"), getE("other"),
+    getPh("work"), getPh("home"), getPh("mobile"), getPh("other"),
+    d.add_time ? d.add_time.split(" ")[0] : "",
+    d[D.utmContent] || "", d[D.utmSource] || "", d[D.utmMedium] || "",
+    d.id || "", d.pipeline_id || "", d[D.source] || "", d.stage_name || "",
+    pId, "", // Person Owner - need separate fetch
+    "", "", "", // Person utm_campaign, content, medium
+    "", // Person created
+    "", "", // Person utm_source, term
+    d[D.utmCampaign] || "",
+    "", "", "", // Person pd_channel, country code, country of origin
+    d.person_name || "", d.lost_reason || "", d.status || "",
+    d[D.depositDate] || "", d[D.unsubscribes] || "",
+    "", // Person DOB
+    pName,
+    d[D.referralId] || "",
+  ];
+}
+
+// Version with person data
+function dealToRowWithPerson(d, p) {
+  const pId = d.person_id?.value || d.person_id || "";
   return [
     d.title || "", d.owner_name || "",
     getEmail(p, "work"), getEmail(p, "home"), getEmail(p, "other"),
@@ -124,7 +136,7 @@ function dealToRow(d, personMap) {
     d.add_time ? d.add_time.split(" ")[0] : "",
     d[D.utmContent] || "", d[D.utmSource] || "", d[D.utmMedium] || "",
     d.id || "", d.pipeline_id || "", d[D.source] || "", d.stage_name || "",
-    pid || "", p ? (p.owner_name || "") : "",
+    pId, p ? (p.owner_name || "") : "",
     p ? (p[P.utmCampaign] || "") : "", p ? (p[P.utmContent] || "") : "",
     p ? (p[P.utmMedium] || "") : "",
     p ? (p.add_time ? p.add_time.split(" ")[0] : "") : "",
@@ -149,32 +161,32 @@ async function appendLog(accessToken, spreadsheetId, logRow) {
   );
 }
 
-async function getStateFromSheet(accessToken, spreadsheetId) {
+async function getState(accessToken, spreadsheetId) {
   try {
     const r = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet3!A1:B1`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet3!A1:C1`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
     const d = await r.json();
     if (d.values && d.values[0]) {
-      return { nextStart: parseInt(d.values[0][0]) || 0, phase: d.values[0][1] || "deals" };
+      return { nextStart: parseInt(d.values[0][0]) || 0, phase: d.values[0][1] || "init", personStart: parseInt(d.values[0][2]) || 0 };
     }
   } catch {}
-  return { nextStart: 0, phase: "init" };
+  return { nextStart: 0, phase: "init", personStart: 0 };
 }
 
-async function saveStateToSheet(accessToken, spreadsheetId, nextStart, phase) {
+async function saveState(accessToken, spreadsheetId, nextStart, phase, personStart) {
   await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet3!A1:B1?valueInputOption=RAW`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet3!A1:C1?valueInputOption=RAW`,
     {
       method: "PUT",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ values: [[nextStart, phase]] }),
+      body: JSON.stringify({ values: [[nextStart, phase, personStart || 0]] }),
     }
   );
 }
 
-const BATCH_SIZE = 20000;
+const BATCH_SIZE = 15000;
 
 export default async function handler(req, res) {
   const startTime = Date.now();
@@ -186,65 +198,66 @@ export default async function handler(req, res) {
 
   try {
     const accessToken = await getAccessToken(clientEmail, privateKey);
-    const state = await getStateFromSheet(accessToken, spreadsheetId);
+    const state = await getState(accessToken, spreadsheetId);
     const now = new Date().toLocaleString("pl-PL", { timeZone: "Europe/Warsaw" });
 
-    if (state.phase === "init" || state.nextStart === 0) {
-      // Phase 1: Start fresh - clear sheet, write headers, fetch persons
-      await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1:BZ200000:clear`,
-        { method: "POST", headers: { Authorization: `Bearer ${accessToken}` } }
-      );
-      await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1?valueInputOption=RAW`,
-        {
-          method: "PUT",
-          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ values: [HEADERS] }),
-        }
-      );
-      await saveStateToSheet(accessToken, spreadsheetId, 0, "deals");
-      await appendLog(accessToken, spreadsheetId, [now, "[PD2] Rozpoczęto nowy cykl sync", "", "INIT"]);
+    // Phase: DEALS - fetch deals without person details first
+    if (state.phase === "init" || state.phase === "deals") {
+      if (state.nextStart === 0) {
+        // Clear and write headers
+        await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1:BZ200000:clear`,
+          { method: "POST", headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1?valueInputOption=RAW`,
+          {
+            method: "PUT",
+            headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ values: [HEADERS] }),
+          }
+        );
+        await appendLog(accessToken, spreadsheetId, [now, "[PD2] Rozpoczęto nowy cykl sync", "", "INIT"]);
+      }
+
+      const { deals, nextStart, hasMore } = await fetchDealsBatch(apiKey, subdomain, state.nextStart, BATCH_SIZE, startTime);
+
+      if (deals.length > 0) {
+        const rows = deals.map(d => dealToRow(d));
+        const rowStart = state.nextStart + 2;
+        await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A${rowStart}?valueInputOption=RAW`,
+          {
+            method: "PUT",
+            headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ values: rows }),
+          }
+        );
+      }
+
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+
+      if (hasMore) {
+        await saveState(accessToken, spreadsheetId, nextStart, "deals", 0);
+        await appendLog(accessToken, spreadsheetId, [now, `[PD2] Deals batch: ${deals.length} (offset ${state.nextStart}-${nextStart})`, `${duration}s`, "BATCH"]);
+        return res.status(200).json({ phase: "deals", batch: deals.length, nextStart, duration: `${duration}s` });
+      } else {
+        const totalDeals = state.nextStart + deals.length;
+        await saveState(accessToken, spreadsheetId, totalDeals, "done", 0);
+        await appendLog(accessToken, spreadsheetId, [now, `[PD2] ZAKOŃCZONO deals - łącznie ${totalDeals}`, `${duration}s`, "DONE"]);
+        return res.status(200).json({ phase: "done", totalDeals, duration: `${duration}s` });
+      }
     }
 
-    // Fetch persons (needed for every batch)
-    const persons = await fetchAllPersons(apiKey, subdomain);
-    const personMap = {};
-    persons.forEach(p => { personMap[p.id] = p; });
+    // Phase done - reset for next cycle
+    await saveState(accessToken, spreadsheetId, 0, "init", 0);
+    return res.status(200).json({ phase: "reset" });
 
-    // Fetch batch of deals
-    const { deals, nextStart, hasMore } = await fetchDealsBatch(apiKey, subdomain, state.nextStart || 0, BATCH_SIZE);
-
-    if (deals.length > 0) {
-      const rows = deals.map(d => dealToRow(d, personMap));
-      const rowStart = (state.nextStart || 0) + 2; // +2 for header row and 1-indexed
-      await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A${rowStart}?valueInputOption=RAW`,
-        {
-          method: "PUT",
-          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ values: rows }),
-        }
-      );
-    }
-
-    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-
-    if (hasMore) {
-      await saveStateToSheet(accessToken, spreadsheetId, nextStart, "deals");
-      await appendLog(accessToken, spreadsheetId, [now, `[PD2] Batch: ${deals.length} dealów (offset ${state.nextStart || 0}-${nextStart}), kontynuacja...`, `${duration}s`, "BATCH"]);
-      res.status(200).json({ success: true, batch: deals.length, nextStart, hasMore: true, duration: `${duration}s` });
-    } else {
-      const totalDeals = (state.nextStart || 0) + deals.length;
-      await saveStateToSheet(accessToken, spreadsheetId, 0, "init");
-      await appendLog(accessToken, spreadsheetId, [now, `[PD2] ZAKOŃCZONO - łącznie ${totalDeals} transakcji`, `${duration}s`, "DONE"]);
-      res.status(200).json({ success: true, totalDeals, hasMore: false, duration: `${duration}s` });
-    }
   } catch (e) {
     try {
       const accessToken = await getAccessToken(clientEmail, privateKey);
       const now = new Date().toLocaleString("pl-PL", { timeZone: "Europe/Warsaw" });
-      await saveStateToSheet(accessToken, spreadsheetId, 0, "init");
+      await saveState(accessToken, spreadsheetId, 0, "init", 0);
       await appendLog(accessToken, spreadsheetId, [now, `[PD2] Błąd: ${e.message}`, "", "ERROR"]);
     } catch {}
     res.status(500).json({ error: e.message });
