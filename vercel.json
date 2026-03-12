@@ -6,7 +6,7 @@
     },
     {
       "path": "/api/cron2",
-      "schedule": "3,18,33,48 * * * *"
+      "schedule": "5,35 * * * *"
     }
   ],
   "functions": {
