@@ -17,7 +17,21 @@ export default async function handler(req, res) {
       more = d.additional_data?.pagination?.more_items_in_collection || false;
       start += 100;
     }
-    res.status(200).json({ success: true, data: all });
+
+    // Fetch persons for email/phone data
+    let persons = [], pStart = 0, pMore = true;
+    while (pMore) {
+      const url = `https://${subdomain}.pipedrive.com/api/v1/persons?api_token=${apiKey}&limit=100&start=${pStart}`;
+      const r = await fetch(url);
+      const d = await r.json();
+      if (!d.success) break;
+      const items = d.data || [];
+      persons = persons.concat(items);
+      pMore = d.additional_data?.pagination?.more_items_in_collection || false;
+      pStart += 100;
+    }
+
+    res.status(200).json({ success: true, data: all, persons });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
