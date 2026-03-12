@@ -1,22 +1,10 @@
 import { useState, useEffect, useRef } from "react";
 
-const CORS_PROXY = "https://corsproxy.io/?";
-
-function encode(str) { return encodeURIComponent(str); }
-
 async function fetchAllDeals(apiKey, subdomain) {
-  let all = [], start = 0, more = true;
-  while (more) {
-    const url = `https://${subdomain}.pipedrive.com/api/v1/deals?api_token=${apiKey}&limit=100&start=${start}&status=all_not_deleted`;
-    const r = await fetch(CORS_PROXY + encode(url));
-    const d = await r.json();
-    if (!d.success) throw new Error(d.error || "Pipedrive API error");
-    const items = d.data || [];
-    all = all.concat(items);
-    more = d.additional_data?.pagination?.more_items_in_collection || false;
-    start += 100;
-  }
-  return all;
+  const r = await fetch(`/api/deals?apiKey=${encodeURIComponent(apiKey)}&subdomain=${encodeURIComponent(subdomain)}`);
+  const d = await r.json();
+  if (d.error) throw new Error(d.error);
+  return d.data;
 }
 
 async function writeToSheets(accessToken, spreadsheetId, deals) {
