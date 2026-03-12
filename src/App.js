@@ -4,34 +4,33 @@ async function fetchAllDeals(apiKey, subdomain) {
   const r = await fetch(`/api/deals?apiKey=${encodeURIComponent(apiKey)}&subdomain=${encodeURIComponent(subdomain)}`);
   const d = await r.json();
   if (d.error) throw new Error(d.error);
-  return d.data;
+  return { deals: d.data, persons: d.persons || [] };
 }
 
-async function writeToSheets(accessToken, spreadsheetId, deals) {
-  const headers = ["ID", "Tytuł", "Wartość", "Waluta", "Status", "Etap", "Właściciel", "Organizacja", "Kontakt", "Data dodania", "Data zamknięcia", "Oczekiwana data zamknięcia"];
-  const rows = deals.map(d => [
-    d.id,
-    d.title || "",
-    d.value || 0,
-    d.currency || "",
-    d.status || "",
-    d.stage_name || "",
-    d.owner_name || "",
-    d.org_name || "",
-    d.person_name || "",
-    d.add_time ? d.add_time.split(" ")[0] : "",
-    d.close_time ? d.close_time.split(" ")[0] : "",
-    d.expected_close_date || "",
-  ]);
-  const values = [headers, ...rows];
+function getEmail(person, label) {
+  if (!person || !person.email) return "";
+  const e = person.email.find(x => x.label === label);
+  return e ? e.value : "";
+}
 
+function getPhone(person, label) {
+  if (!person || !person.phone) return "";
+  const p = person.phone.find(x => x.label === label);
+  return p ? p.value : "";
+}
+
+function getCustomField(deal, key) {
+  return deal[key] !== undefined && deal[key] !== null ? deal[key] : "";
+}
+
+async function writeToSheets(accessToken, spreadsheetId, sheetName, headers, rows) {
+  const values = [headers, ...rows];
   await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1:Z10000:clear`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${sheetName}!A1:BZ10000:clear`,
     { method: "POST", headers: { Authorization: `Bearer ${accessToken}` } }
   );
-
   const res = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1?valueInputOption=RAW`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${sheetName}!A1?valueInputOption=RAW`,
     {
       method: "PUT",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
@@ -41,6 +40,19 @@ async function writeToSheets(accessToken, spreadsheetId, deals) {
   const json = await res.json();
   if (json.error) throw new Error(json.error.message);
   return json.updatedRows - 1;
+}
+
+async function appendLog(accessToken, spreadsheetId, logRow) {
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet2!A:D:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ values: [logRow] }),
+    }
+  );
+  const json = await res.json();
+  if (json.error) console.error("Log error:", json.error.message);
 }
 
 export default function App() {
@@ -56,6 +68,8 @@ export default function App() {
   const [preview, setPreview] = useState(false);
   const intervalRef = useRef(null);
   const [step, setStep] = useState("config");
+  const [fieldMap, setFieldMap] = useState({});
+  const [fieldMapLoaded, setFieldMapLoaded] = useState(false);
 
   useEffect(() => {
     try {
@@ -65,6 +79,7 @@ export default function App() {
       if (c.spreadsheetId) setSpreadsheetId(c.spreadsheetId);
       if (c.googleToken) setGoogleToken(c.googleToken);
       if (c.step) setStep(c.step);
+      if (c.fieldMap) { setFieldMap(c.fieldMap); setFieldMapLoaded(true); }
     } catch {}
   }, []);
 
@@ -77,8 +92,24 @@ export default function App() {
     }
   }, [autoInterval, pipedriveKey, subdomain, spreadsheetId, googleToken]);
 
+  async function loadFieldMap() {
+    try {
+      const r = await fetch(`/api/deals?apiKey=${encodeURIComponent(pipedriveKey)}&subdomain=${encodeURIComponent(subdomain)}`);
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+      if (d.data && d.data.length > 0) {
+        const sample = d.data[0];
+        const keys = Object.keys(sample).filter(k => k.match(/^[a-f0-9]{40}$/));
+        const map = {};
+        keys.forEach(k => { map[k] = sample[k] !== null ? typeof sample[k] : "unknown"; });
+        setFieldMap(map);
+        setFieldMapLoaded(true);
+      }
+    } catch {}
+  }
+
   function saveConfig() {
-    localStorage.setItem("pd_sync_config", JSON.stringify({ pipedriveKey, subdomain, spreadsheetId, googleToken, step: "sync" }));
+    localStorage.setItem("pd_sync_config", JSON.stringify({ pipedriveKey, subdomain, spreadsheetId, googleToken, step: "sync", fieldMap }));
     setStep("sync");
     setStatus({ type: "success", msg: "Konfiguracja zapisana!" });
   }
@@ -90,14 +121,96 @@ export default function App() {
     }
     setLoading(true);
     setStatus({ type: "info", msg: auto ? "⏱ Auto-sync w toku..." : "🔄 Synchronizacja w toku..." });
+    const startTime = new Date();
     try {
-      const fetchedDeals = await fetchAllDeals(pipedriveKey, subdomain);
+      const { deals: fetchedDeals, persons } = await fetchAllDeals(pipedriveKey, subdomain);
       setDeals(fetchedDeals);
-      await writeToSheets(googleToken, spreadsheetId, fetchedDeals);
-      const now = new Date().toLocaleTimeString("pl-PL");
-      setLastSync(now);
-      setStatus({ type: "success", msg: `✅ Zsynchronizowano ${fetchedDeals.length} transakcji o ${now}` });
+      const personMap = {};
+      persons.forEach(p => { personMap[p.id] = p; });
+
+      const headers = [
+        "Deal - Title", "Deal - CRM ID", "Deal - Closing Date", "Deal - Deal created",
+        "Deal - Discounted amount", "Deal - Contact person", "Deal - Owner",
+        "Person - Email - Work", "Person - Email - Home", "Person - Email - Other",
+        "Deal - ID", "Deal - Lead Status", "Deal - Product", "Deal - URL",
+        "Deal - utm_source", "Deal - utm_medium", "Deal - utm_campaign", "Deal - utm_content",
+        "Deal - Lost reason", "Person - Provincia", "Deal - Stage", "Deal - Status",
+        "Person - ID", "Deal - Record Id (Deals_zoho)", "Person - Marketing consent",
+        "Person - Marketing consent phone", "Person - Phone - Work", "Person - Phone - Home",
+        "Person - Phone - Mobile", "Person - Phone - Other", "Deal - Student First Name",
+        "Deal - Student Last Name", "Person - Student DOB", "Deal - Student Gender",
+        "Deal - Lead Source", "Deal - Deposit Date", "Deal - Last activity date",
+        "Deal - Source origin", "Deal - Source channel", "Deal - Source origin ID",
+        "Deal - Source channel ID", "Person - utm_source"
+      ];
+
+      const rows = fetchedDeals.map(d => {
+        const personId = d.person_id?.value || d.person_id;
+        const person = personMap[personId] || null;
+        return [
+          d.title || "",
+          d.id || "",
+          d.close_time ? d.close_time.split(" ")[0] : "",
+          d.add_time ? d.add_time.split(" ")[0] : "",
+          d.value || 0,
+          d.person_name || "",
+          d.owner_name || "",
+          getEmail(person, "work"),
+          getEmail(person, "home"),
+          getEmail(person, "other"),
+          d.id || "",
+          getCustomField(d, "lead_status") || getCustomField(d, "label") || "",
+          getCustomField(d, "product") || "",
+          getCustomField(d, "deal_url") || "",
+          getCustomField(d, "utm_source") || "",
+          getCustomField(d, "utm_medium") || "",
+          getCustomField(d, "utm_campaign") || "",
+          getCustomField(d, "utm_content") || "",
+          d.lost_reason || "",
+          person ? getCustomField(person, "provincia") || "" : "",
+          d.stage_name || "",
+          d.status || "",
+          personId || "",
+          getCustomField(d, "record_id_deals_zoho") || "",
+          person ? getCustomField(person, "marketing_consent") || "" : "",
+          person ? getCustomField(person, "marketing_consent_phone") || "" : "",
+          getPhone(person, "work"),
+          getPhone(person, "home"),
+          getPhone(person, "mobile"),
+          getPhone(person, "other"),
+          getCustomField(d, "student_first_name") || "",
+          getCustomField(d, "student_last_name") || "",
+          person ? getCustomField(person, "student_dob") || "" : "",
+          getCustomField(d, "student_gender") || "",
+          getCustomField(d, "lead_source") || "",
+          getCustomField(d, "deposit_date") || "",
+          d.last_activity_date || "",
+          d.origin || "",
+          d.channel || "",
+          d.origin_id || "",
+          d.channel_id || "",
+          person ? getCustomField(person, "utm_source") || "" : "",
+        ];
+      });
+
+      await writeToSheets(googleToken, spreadsheetId, "Sheet1", headers, rows);
+
+      const now = new Date();
+      const duration = ((now - startTime) / 1000).toFixed(1);
+      const logRow = [
+        now.toLocaleString("pl-PL"),
+        `Zsynchronizowano ${fetchedDeals.length} transakcji`,
+        `${duration}s`,
+        "OK"
+      ];
+      await appendLog(googleToken, spreadsheetId, logRow);
+
+      setLastSync(now.toLocaleTimeString("pl-PL"));
+      setStatus({ type: "success", msg: `✅ Zsynchronizowano ${fetchedDeals.length} transakcji o ${now.toLocaleTimeString("pl-PL")} (${duration}s)` });
     } catch (e) {
+      const now = new Date();
+      const logRow = [now.toLocaleString("pl-PL"), `Błąd: ${e.message}`, "", "ERROR"];
+      try { await appendLog(googleToken, spreadsheetId, logRow); } catch {}
       setStatus({ type: "error", msg: `❌ Błąd: ${e.message}` });
     }
     setLoading(false);
