@@ -28,21 +28,26 @@ async function getAccessToken(email, privateKey) {
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
 const MAX_RUN_TIME = 250000; // 250 seconds safety limit
 
+const MIN_DATE_2 = "2023-01-01";
+
 async function fetchDealsBatch(apiKey, subdomain, startFrom, batchSize, startTime) {
   let all = [], start = startFrom, fetched = 0, more = true;
   while (more && fetched < batchSize) {
     if (Date.now() - startTime > MAX_RUN_TIME) break;
     const limit = Math.min(500, batchSize - fetched);
-    const url = `https://${subdomain}.pipedrive.com/api/v1/deals?api_token=${apiKey}&limit=${limit}&start=${start}&status=all_not_deleted`;
+    const url = `https://${subdomain}.pipedrive.com/api/v1/deals?api_token=${apiKey}&limit=${limit}&start=${start}&status=all_not_deleted&sort=add_time ASC`;
     const r = await fetch(url);
     if (r.status === 429) { await delay(2000); continue; }
     const d = await r.json();
     if (!d.success) throw new Error(d.error || "Pipedrive API error");
-    const items = d.data || [];
+    const items = (d.data || []).filter(deal => {
+      const addDate = deal.add_time ? deal.add_time.split(" ")[0] : "";
+      return addDate >= MIN_DATE_2;
+    });
     all = all.concat(items);
-    fetched += items.length;
+    fetched += (d.data || []).length;
     more = d.additional_data?.pagination?.more_items_in_collection || false;
-    start += items.length;
+    start += (d.data || []).length;
     if (more && fetched < batchSize) await delay(200);
   }
   return { deals: all, nextStart: start, hasMore: more };
