@@ -47,12 +47,7 @@ async function fetchDealsBatch(apiKey, subdomain, startFrom, batchSize, startTim
     start += items.length;
     if (more && fetched < batchSize) await delay(200);
   }
-  // Filter by date after fetching
-  const filtered = all.filter(deal => {
-    const addDate = deal.add_time ? deal.add_time.split(" ")[0] : "";
-    return addDate >= MIN_DATE_2;
-  });
-  return { deals: filtered, allCount: all.length, nextStart: start, hasMore: more };
+  return { deals: all, allCount: all.length, nextStart: start, hasMore: more };
 }
 
 function getEmail(person, label) {
@@ -252,7 +247,7 @@ export default async function handler(req, res) {
 
       if (hasMore) {
         await saveState(accessToken, spreadsheetId, nextStart, "deals", 0, newWrittenRows);
-        await appendLog(accessToken, spreadsheetId, [now, `[PD2] Batch: ${deals.length}/${allCount} dealów (offset ${state.nextStart}-${nextStart}), zapisano łącznie ${newWrittenRows}`, `${duration}s`, "BATCH"]);
+        await appendLog(accessToken, spreadsheetId, [now, `[PD2] Batch: ${deals.length} dealów (offset ${state.nextStart}-${nextStart}), zapisano łącznie ${newWrittenRows}`, `${duration}s`, "BATCH"]);
         return res.status(200).json({ phase: "deals", batch: deals.length, nextStart, writtenRows: newWrittenRows, duration: `${duration}s` });
       } else {
         await saveState(accessToken, spreadsheetId, 0, "init", 0, 0);
