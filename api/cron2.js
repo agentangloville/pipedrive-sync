@@ -35,22 +35,24 @@ async function fetchDealsBatch(apiKey, subdomain, startFrom, batchSize, startTim
   while (more && fetched < batchSize) {
     if (Date.now() - startTime > MAX_RUN_TIME) break;
     const limit = Math.min(500, batchSize - fetched);
-    const url = `https://${subdomain}.pipedrive.com/api/v1/deals?api_token=${apiKey}&limit=${limit}&start=${start}&status=all_not_deleted&sort=add_time ASC`;
+    const url = `https://${subdomain}.pipedrive.com/api/v1/deals?api_token=${apiKey}&limit=${limit}&start=${start}&status=all_not_deleted`;
     const r = await fetch(url);
     if (r.status === 429) { await delay(2000); continue; }
     const d = await r.json();
     if (!d.success) throw new Error(d.error || "Pipedrive API error");
-    const items = (d.data || []).filter(deal => {
-      const addDate = deal.add_time ? deal.add_time.split(" ")[0] : "";
-      return addDate >= MIN_DATE_2;
-    });
+    const items = d.data || [];
     all = all.concat(items);
-    fetched += (d.data || []).length;
+    fetched += items.length;
     more = d.additional_data?.pagination?.more_items_in_collection || false;
-    start += (d.data || []).length;
+    start += items.length;
     if (more && fetched < batchSize) await delay(200);
   }
-  return { deals: all, nextStart: start, hasMore: more };
+  // Filter by date after fetching
+  const filtered = all.filter(deal => {
+    const addDate = deal.add_time ? deal.add_time.split(" ")[0] : "";
+    return addDate >= MIN_DATE_2;
+  });
+  return { deals: filtered, allCount: all.length, nextStart: start, hasMore: more };
 }
 
 function getEmail(person, label) {
@@ -169,24 +171,29 @@ async function appendLog(accessToken, spreadsheetId, logRow) {
 async function getState(accessToken, spreadsheetId) {
   try {
     const r = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet3!A1:C1`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet3!A1:D1`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
     const d = await r.json();
     if (d.values && d.values[0]) {
-      return { nextStart: parseInt(d.values[0][0]) || 0, phase: d.values[0][1] || "init", personStart: parseInt(d.values[0][2]) || 0 };
+      return {
+        nextStart: parseInt(d.values[0][0]) || 0,
+        phase: d.values[0][1] || "init",
+        personStart: parseInt(d.values[0][2]) || 0,
+        writtenRows: parseInt(d.values[0][3]) || 0,
+      };
     }
   } catch {}
-  return { nextStart: 0, phase: "init", personStart: 0 };
+  return { nextStart: 0, phase: "init", personStart: 0, writtenRows: 0 };
 }
 
-async function saveState(accessToken, spreadsheetId, nextStart, phase, personStart) {
+async function saveState(accessToken, spreadsheetId, nextStart, phase, personStart, writtenRows) {
   await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet3!A1:C1?valueInputOption=RAW`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet3!A1:D1?valueInputOption=RAW`,
     {
       method: "PUT",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ values: [[nextStart, phase, personStart || 0]] }),
+      body: JSON.stringify({ values: [[nextStart, phase, personStart || 0, writtenRows || 0]] }),
     }
   );
 }
@@ -225,11 +232,11 @@ export default async function handler(req, res) {
         await appendLog(accessToken, spreadsheetId, [now, "[PD2] Rozpoczęto nowy cykl sync", "", "INIT"]);
       }
 
-      const { deals, nextStart, hasMore } = await fetchDealsBatch(apiKey, subdomain, state.nextStart, BATCH_SIZE, startTime);
+      const { deals, allCount, nextStart, hasMore } = await fetchDealsBatch(apiKey, subdomain, state.nextStart, BATCH_SIZE, startTime);
 
       if (deals.length > 0) {
         const rows = deals.map(d => dealToRow(d));
-        const rowStart = state.nextStart + 2;
+        const rowStart = (state.writtenRows || 0) + 2;
         await fetch(
           `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A${rowStart}?valueInputOption=RAW`,
           {
@@ -240,29 +247,29 @@ export default async function handler(req, res) {
         );
       }
 
+      const newWrittenRows = (state.writtenRows || 0) + deals.length;
       const duration = ((Date.now() - startTime) / 1000).toFixed(1);
 
       if (hasMore) {
-        await saveState(accessToken, spreadsheetId, nextStart, "deals", 0);
-        await appendLog(accessToken, spreadsheetId, [now, `[PD2] Deals batch: ${deals.length} (offset ${state.nextStart}-${nextStart})`, `${duration}s`, "BATCH"]);
-        return res.status(200).json({ phase: "deals", batch: deals.length, nextStart, duration: `${duration}s` });
+        await saveState(accessToken, spreadsheetId, nextStart, "deals", 0, newWrittenRows);
+        await appendLog(accessToken, spreadsheetId, [now, `[PD2] Batch: ${deals.length}/${allCount} dealów (offset ${state.nextStart}-${nextStart}), zapisano łącznie ${newWrittenRows}`, `${duration}s`, "BATCH"]);
+        return res.status(200).json({ phase: "deals", batch: deals.length, nextStart, writtenRows: newWrittenRows, duration: `${duration}s` });
       } else {
-        const totalDeals = state.nextStart + deals.length;
-        await saveState(accessToken, spreadsheetId, totalDeals, "done", 0);
-        await appendLog(accessToken, spreadsheetId, [now, `[PD2] ZAKOŃCZONO deals - łącznie ${totalDeals}`, `${duration}s`, "DONE"]);
-        return res.status(200).json({ phase: "done", totalDeals, duration: `${duration}s` });
+        await saveState(accessToken, spreadsheetId, 0, "init", 0, 0);
+        await appendLog(accessToken, spreadsheetId, [now, `[PD2] ZAKOŃCZONO - łącznie ${newWrittenRows} transakcji (z filtra dat)`, `${duration}s`, "DONE"]);
+        return res.status(200).json({ phase: "done", totalDeals: newWrittenRows, duration: `${duration}s` });
       }
     }
 
     // Phase done - reset for next cycle
-    await saveState(accessToken, spreadsheetId, 0, "init", 0);
+    await saveState(accessToken, spreadsheetId, 0, "init", 0, 0);
     return res.status(200).json({ phase: "reset" });
 
   } catch (e) {
     try {
       const accessToken = await getAccessToken(clientEmail, privateKey);
       const now = new Date().toLocaleString("pl-PL", { timeZone: "Europe/Warsaw" });
-      await saveState(accessToken, spreadsheetId, 0, "init", 0);
+      await saveState(accessToken, spreadsheetId, 0, "init", 0, 0);
       await appendLog(accessToken, spreadsheetId, [now, `[PD2] Błąd: ${e.message}`, "", "ERROR"]);
     } catch {}
     res.status(500).json({ error: e.message });
