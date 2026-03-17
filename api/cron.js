@@ -82,7 +82,25 @@ function getPhone(person, label) {
   return f ? f.value : "";
 }
 
-const D = {
+async function fetchStages(apiKey, subdomain) {
+  const url = `https://${subdomain}.pipedrive.com/api/v1/stages?api_token=${apiKey}`;
+  const r = await fetch(url);
+  const d = await r.json();
+  if (!d.success) return {};
+  const map = {};
+  (d.data || []).forEach(s => { map[s.id] = s.name; });
+  return map;
+}
+
+async function fetchPipelines(apiKey, subdomain) {
+  const url = `https://${subdomain}.pipedrive.com/api/v1/pipelines?api_token=${apiKey}`;
+  const r = await fetch(url);
+  const d = await r.json();
+  if (!d.success) return {};
+  const map = {};
+  (d.data || []).forEach(p => { map[p.id] = p.name; });
+  return map;
+}
   crmId: "9a593a72e1ac99aa6228dadfcbbcb48a875cbc4b",
   closingDate: "47072fdbb046948cf50a291844f2724a6a6cdfc8",
   discountedAmount: "87832e6fd2b4ef37ae64965eca3552f027e29b72",
@@ -132,6 +150,8 @@ export default async function handler(req, res) {
       fetchAllPersons(apiKey, subdomain),
     ]);
 
+    const stageMap = await fetchStages(apiKey, subdomain);
+
     const personMap = {};
     persons.forEach(p => { personMap[p.id] = p; });
 
@@ -162,7 +182,7 @@ export default async function handler(req, res) {
         d.id || "", d[D.leadStatus] || "", d[D.product] || "", d[D.url] || "",
         d[D.utmSource] || "", d[D.utmMedium] || "", d[D.utmCampaign] || "",
         d[D.utmContent] || "", d.lost_reason || "",
-        p ? (p[P.provincia] || "") : "", d.stage_name || "", d.status || "",
+        p ? (p[P.provincia] || "") : "", stageMap[d.stage_id] || d.stage_id || "", d.status || "",
         pid || "", d[D.recordIdZoho] || "",
         p ? (p[P.marketingConsent] || "") : "",
         p ? (p[P.marketingConsentPhone] || "") : "",
