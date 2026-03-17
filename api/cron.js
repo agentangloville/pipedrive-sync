@@ -37,21 +37,20 @@ const MIN_DATE_1 = "2025-10-08";
 async function fetchAllDeals(apiKey, subdomain) {
   let all = [], start = 0, more = true;
   while (more) {
-    const url = `https://${subdomain}.pipedrive.com/api/v1/deals?api_token=${apiKey}&limit=500&start=${start}&status=all_not_deleted&sort=add_time ASC`;
+    const url = `https://${subdomain}.pipedrive.com/api/v1/deals?api_token=${apiKey}&limit=500&start=${start}&status=all_not_deleted`;
     const r = await fetch(url);
     if (r.status === 429) { await delay(2000); continue; }
     const d = await r.json();
     if (!d.success) throw new Error(d.error || "Pipedrive API error");
-    const items = (d.data || []).filter(deal => {
-      const addDate = deal.add_time ? deal.add_time.split(" ")[0] : "";
-      return addDate >= MIN_DATE_1;
-    });
-    all = all.concat(items);
+    all = all.concat(d.data || []);
     more = d.additional_data?.pagination?.more_items_in_collection || false;
     start += 500;
     if (more) await delay(500);
   }
-  return all;
+  return all.filter(deal => {
+    const addDate = deal.add_time ? deal.add_time.split(" ")[0] : "";
+    return addDate >= MIN_DATE_1;
+  });
 }
 
 async function fetchAllPersons(apiKey, subdomain) {
@@ -92,15 +91,7 @@ async function fetchStages(apiKey, subdomain) {
   return map;
 }
 
-async function fetchPipelines(apiKey, subdomain) {
-  const url = `https://${subdomain}.pipedrive.com/api/v1/pipelines?api_token=${apiKey}`;
-  const r = await fetch(url);
-  const d = await r.json();
-  if (!d.success) return {};
-  const map = {};
-  (d.data || []).forEach(p => { map[p.id] = p.name; });
-  return map;
-}
+const D = {
   crmId: "9a593a72e1ac99aa6228dadfcbbcb48a875cbc4b",
   closingDate: "47072fdbb046948cf50a291844f2724a6a6cdfc8",
   discountedAmount: "87832e6fd2b4ef37ae64965eca3552f027e29b72",
@@ -128,14 +119,6 @@ const P = {
 };
 
 export default async function handler(req, res) {
-  const authHeader = req.headers.authorization;
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-    // Allow Vercel cron (no auth header) or correct secret
-    if (authHeader && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-  }
-
   const startTime = Date.now();
   const apiKey = process.env.PIPEDRIVE_API_KEY;
   const subdomain = process.env.PIPEDRIVE_SUBDOMAIN;
