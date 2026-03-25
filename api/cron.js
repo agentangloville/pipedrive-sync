@@ -37,7 +37,7 @@ const MIN_DATE_1 = "2025-10-08";
 async function fetchAllDeals(apiKey, subdomain) {
   let all = [], start = 0, more = true;
   while (more) {
-    const url = `https://${subdomain}.pipedrive.com/api/v1/deals?api_token=${apiKey}&limit=500&start=${start}&status=all_not_deleted&sort=add_time ASC`;
+    const url = `https://${subdomain}.pipedrive.com/api/v1/deals?api_token=${apiKey}&limit=500&start=${start}&status=all_not_deleted`;
     const r = await fetch(url);
     if (r.status === 429) { await delay(2000); continue; }
     const d = await r.json();
@@ -68,6 +68,16 @@ async function fetchAllPersons(apiKey, subdomain) {
     if (more) await delay(500);
   }
   return all;
+}
+
+async function fetchStages(apiKey, subdomain) {
+  const url = `https://${subdomain}.pipedrive.com/api/v1/stages?api_token=${apiKey}`;
+  const r = await fetch(url);
+  const d = await r.json();
+  if (!d.success) return {};
+  const map = {};
+  (d.data || []).forEach(s => { map[s.id] = s.name; });
+  return map;
 }
 
 function getEmail(person, label) {
@@ -112,7 +122,6 @@ const P = {
 export default async function handler(req, res) {
   const authHeader = req.headers.authorization;
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-    // Allow Vercel cron (no auth header) or correct secret
     if (authHeader && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -131,6 +140,8 @@ export default async function handler(req, res) {
       fetchAllDeals(apiKey, subdomain),
       fetchAllPersons(apiKey, subdomain),
     ]);
+
+    const stageMap = await fetchStages(apiKey, subdomain);
 
     const personMap = {};
     persons.forEach(p => { personMap[p.id] = p; });
@@ -162,7 +173,7 @@ export default async function handler(req, res) {
         d.id || "", d[D.leadStatus] || "", d[D.product] || "", d[D.url] || "",
         d[D.utmSource] || "", d[D.utmMedium] || "", d[D.utmCampaign] || "",
         d[D.utmContent] || "", d.lost_reason || "",
-        p ? (p[P.provincia] || "") : "", d.stage_name || "", d.status || "",
+        p ? (p[P.provincia] || "") : "", stageMap[d.stage_id] || "", d.status || "",
         pid || "", d[D.recordIdZoho] || "",
         p ? (p[P.marketingConsent] || "") : "",
         p ? (p[P.marketingConsentPhone] || "") : "",
