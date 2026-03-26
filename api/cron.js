@@ -70,6 +70,16 @@ async function fetchAllPersons(apiKey, subdomain) {
   return all;
 }
 
+async function fetchStages(apiKey, subdomain) {
+  const url = `https://${subdomain}.pipedrive.com/api/v1/stages?api_token=${apiKey}`;
+  const r = await fetch(url);
+  const d = await r.json();
+  if (!d.success) return {};
+  const map = {};
+  (d.data || []).forEach(s => { map[s.id] = s.name; });
+  return map;
+}
+
 function getEmail(person, label) {
   if (!person?.email) return "";
   const f = person.email.find(x => x.label?.toLowerCase() === label.toLowerCase());
@@ -112,7 +122,6 @@ const P = {
 export default async function handler(req, res) {
   const authHeader = req.headers.authorization;
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-    // Allow Vercel cron (no auth header) or correct secret
     if (authHeader && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -131,6 +140,8 @@ export default async function handler(req, res) {
       fetchAllDeals(apiKey, subdomain),
       fetchAllPersons(apiKey, subdomain),
     ]);
+
+    const stageMap = await fetchStages(apiKey, subdomain);
 
     const personMap = {};
     persons.forEach(p => { personMap[p.id] = p; });
@@ -162,7 +173,7 @@ export default async function handler(req, res) {
         d.id || "", d[D.leadStatus] || "", d[D.product] || "", d[D.url] || "",
         d[D.utmSource] || "", d[D.utmMedium] || "", d[D.utmCampaign] || "",
         d[D.utmContent] || "", d.lost_reason || "",
-        p ? (p[P.provincia] || "") : "", d.stage_name || "", d.status || "",
+        p ? (p[P.provincia] || "") : "", stageMap[d.stage_id] || "", d.status || "",
         pid || "", d[D.recordIdZoho] || "",
         p ? (p[P.marketingConsent] || "") : "",
         p ? (p[P.marketingConsentPhone] || "") : "",
